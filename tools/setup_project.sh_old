@@ -1,0 +1,373 @@
+#!/bin/bash
+
+# Aller au répertoire parent (sortir de `tools/`)
+cd "$(dirname "$0")/.." || exit
+
+# Demander le nom du projet
+read -p "Entrez le nom du projet : " PROJECT_NAME
+
+# Vérifier si un nom a été entré
+if [ -z "$PROJECT_NAME" ]; then
+  echo "❌ Erreur : Vous devez entrer un nom de projet."
+  exit 1
+fi
+
+# Suppression complète des conteneurs liés au projet
+echo "🛑 Suppression complète des conteneurs Docker existants pour le projet '$PROJECT_NAME'..."
+docker compose -f "$PROJECT_NAME/docker-compose.yml" down --remove-orphans 2>/dev/null || true
+docker rm -f $(docker ps -aq --filter "name=${PROJECT_NAME}_") 2>/dev/null || true
+echo "✅ Conteneurs supprimés."
+
+# Liste des répertoires à créer (hors Docker)
+DIRS=(
+  "$PROJECT_NAME/src/Domain/Model"
+  "$PROJECT_NAME/src/Domain/Repository"
+  "$PROJECT_NAME/src/Application"
+  "$PROJECT_NAME/src/Infrastructure/Persistence"
+  "$PROJECT_NAME/src/Infrastructure/Http"
+  "$PROJECT_NAME/config"
+  "$PROJECT_NAME/public"
+  "$PROJECT_NAME/docker/php"
+)
+
+# Création des répertoires uniquement s'ils n'existent pas
+echo "🚀 Création de la structure du projet : $PROJECT_NAME..."
+for DIR in "${DIRS[@]}"; do
+  if [ ! -d "$DIR" ]; then
+    mkdir -p "$DIR"
+    echo "📁 Dossier créé : $DIR"
+  else
+    echo "⚠️ Le dossier $DIR existe déjà."
+  fi
+done
+
+############################INDEX.PHP###############################
+echo "📝 Création du fichier index.php de démonstration..."
+# Création de la page index.php de démonstration avec le nom du projet dynamique
+cat <<EOL > "$PROJECT_NAME/public/index.php"
+<?php
+declare(strict_types=1);
+
+\$projectName = getenv('PROJECT_NAME') ?: '$PROJECT_NAME';
+
+\$databaseConfig = [
+    'host' => getenv('MYSQL_HOST') ?: 'mysql',
+    'dbname' => getenv('MYSQL_DATABASE') ?: 'app_db',
+    'user' => getenv('MYSQL_USER') ?: 'user',
+    'password' => getenv('MYSQL_PASSWORD') ?: 'password',
+];
+
+function checkDatabaseConnection(\$config): string {
+    try {
+        \$dsn = "mysql:host={\$config['host']};dbname={\$config['dbname']};charset=utf8mb4";
+        \$pdo = new PDO(\$dsn, \$config['user'], \$config['password'], [
+            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
+        ]);
+        return "<span style='color:green;'>✅ Connexion à MySQL réussie !</span>";
+    } catch (PDOException \$e) {
+        return "<span style='color:red;'>❌ Erreur MySQL : " . \$e->getMessage() . "</span>";
+    }
+}
+?>
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bienvenue sur <?= htmlspecialchars(\$projectName) ?></title>
+    <style>
+        body { font-family: Arial, sans-serif; text-align: center; padding: 50px; background-color: #f4f4f4; }
+        h1 { color: #333; }
+        .container { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 0 10px rgba(0,0,0,0.1); display: inline-block; }
+        .status { font-size: 1.2em; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Bienvenue sur <?= htmlspecialchars(\$projectName) ?> !</h1>
+        <p>Votre environnement PHP, MySQL et Nginx fonctionne correctement.</p>
+        <div class="status">
+            <?= checkDatabaseConnection(\$databaseConfig); ?>
+        </div>
+    </div>
+</body>
+</html>
+EOL
+echo "✅ Page index.php de démonstration créée avec le nom du projet : $PROJECT_NAME"
+####################################################################
+
+############################SERVICE SELECTION#######################
+# Demande des conteneurs à activer
+echo "Quels conteneurs Docker souhaitez-vous mettre en place ?"
+while true; do
+  read -p "[y/n] Activer Nginx ? [Y] " USE_NGINX
+  USE_NGINX=${USE_NGINX:-"y"}
+  [[ "$USE_NGINX" =~ ^[YyNn]$ ]] && break
+done
+
+while true; do
+  read -p "[y/n] Activer MySQL ? [Y] " USE_MYSQL
+  USE_MYSQL=${USE_MYSQL:-"y"}
+  [[ "$USE_MYSQL" =~ ^[YyNn]$ ]] && break
+done
+
+while true; do
+  read -p "[y/n] Activer Redis (non recommandé sans modification système) ? [N] " USE_REDIS
+  USE_REDIS=${USE_REDIS:-"n"}
+  [[ "$USE_REDIS" =~ ^[YyNn]$ ]] && break
+done
+####################################################################
+
+
+# Affecter les valeurs par défaut si l'utilisateur n'a pas répondu
+USE_NGINX=${USE_NGINX:-"y"}
+USE_MYSQL=${USE_MYSQL:-"y"}
+USE_REDIS=${USE_REDIS:-"n"}
+
+# Génération dynamique du docker-compose.yml
+COMPOSE_FILE="$PROJECT_NAME/docker-compose.yml"
+# Création du fichier docker-compose.yml
+echo "version: '3.8'" > "$COMPOSE_FILE"
+echo "" >> "$COMPOSE_FILE"
+echo "services:" >> "$COMPOSE_FILE"
+
+# Si MySQL est activé, demander les informations
+if [[ "$USE_MYSQL" =~ ^[Yy]$ ]]; then
+  read -p "Entrez le nom de l'utilisateur MySQL : " MYSQL_USER
+  read -sp "Entrez le mot de passe MySQL : " MYSQL_PASSWORD
+  echo ""
+  read -p "Entrez le nom de la base de données MySQL : " MYSQL_DATABASE
+
+  # Valeurs par défaut si l'utilisateur ne remplit pas
+  MYSQL_USER=${MYSQL_USER:-"user"}
+  MYSQL_PASSWORD=${MYSQL_PASSWORD:-"password"}
+  MYSQL_DATABASE=${MYSQL_DATABASE:-"app_db"}
+fi
+
+# Si l'utilisateur active Redis, afficher un message informatif
+if [[ "$USE_REDIS" =~ ^[Yy]$ ]]; then
+  echo ""
+  echo "⚠️  ATTENTION : Redis nécessite une modification du noyau de la machine hôte pour éviter des erreurs de mémoire."
+  echo "🚀  Vous devez exécuter les commandes suivantes sur votre machine hôte avant de démarrer Redis :"
+  echo ""
+  echo "    sudo bash -c 'echo \"vm.overcommit_memory = 1\" >> /etc/sysctl.conf'"
+  echo "    sudo sysctl -w vm.overcommit_memory=1"
+  echo ""
+  echo "📌  Sans cette modification, Redis pourrait planter ou ne pas sauvegarder correctement les données."
+  echo "❌  Si vous ne souhaitez pas modifier votre machine hôte, répondez 'n' à l'activation de Redis."
+  echo ""
+
+  # Création du fichier de configuration Redis si Redis est activé
+  mkdir -p "$PROJECT_NAME/docker/redis"
+  echo "vm.overcommit_memory = 1" > "$PROJECT_NAME/docker/redis/redis.conf"
+  echo "✅ Fichier de configuration Redis créé avec 'vm.overcommit_memory = 1'."
+
+  # Création du service Redis dans le docker-compose.yml
+  ####################REDIS SERVICE############################
+  cat <<EOL >> "$COMPOSE_FILE"
+  redis:
+    image: redis:latest
+    container_name: ${PROJECT_NAME}_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./docker/redis/redis.conf:/usr/local/etc/redis/redis.conf
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    networks:
+      - app_network
+EOL
+fi
+
+# Si Nginx est activé, création du fichier de configuration par défaut
+if [[ "$USE_NGINX" =~ ^[Yy]$ ]]; then
+  mkdir -p "$PROJECT_NAME/docker/nginx"
+  echo "✅ Dossier Nginx créé."
+  # Création du fichier de configuration Nginx
+  echo "Création du fichier de configuration Nginx..."
+  cat <<EOL > "$PROJECT_NAME/docker/nginx/default.conf"
+server {
+    listen 80;
+    server_name localhost;
+
+    root /var/www/html/public;
+    index index.php index.html index.htm;
+
+    location / {
+        try_files \$uri /index.php\$is_args\$args;
+    }
+
+    location ~ \.php$ {
+        include fastcgi_params;
+        fastcgi_pass php:9000;
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+    }
+
+    error_log  /var/log/nginx/error.log warn;
+    access_log /var/log/nginx/access.log main;
+}
+EOL
+
+  echo "✅ Fichier de configuration Nginx créé."
+  # Création du service Nginx dans le docker-compose.yml
+  ####################NGINX SERVICE############################
+  cat <<EOL >> "$COMPOSE_FILE"
+  nginx:
+    image: nginx:latest
+    container_name: ${PROJECT_NAME}_nginx
+    ports:
+      - "8080:80"
+    volumes:
+      - ./public:/var/www/html/public
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf
+    depends_on:
+      - php
+    networks:
+      - app_network
+
+EOL
+fi
+############################MYSQL###############################
+if [[ "$USE_MYSQL" =~ ^[Yy]$ ]]; then
+  cat <<EOL >> "$COMPOSE_FILE"
+  mysql:
+    image: mysql:8
+    container_name: ${PROJECT_NAME}_mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: $MYSQL_PASSWORD
+      MYSQL_DATABASE: $MYSQL_DATABASE
+      MYSQL_USER: $MYSQL_USER
+      MYSQL_PASSWORD: $MYSQL_PASSWORD
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - app_network
+
+EOL
+fi
+
+
+
+# Création du Dockerfile PHP
+cat <<EOL > "$PROJECT_NAME/docker/php/Dockerfile"
+FROM php:8.2-fpm
+
+RUN apt-get update && apt-get install -y \
+    git \
+    unzip \
+    libpq-dev \
+    libonig-dev \
+    libxml2-dev \
+    && docker-php-ext-install pdo_mysql xml
+
+RUN docker-php-ext-enable pdo_mysql xml
+
+COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
+
+WORKDIR /var/www/html
+
+EOL
+
+echo "✅ Fichier Dockerfile créé pour PHP."
+####################PHP SERVICE############################
+cat <<EOL >> "$COMPOSE_FILE"
+  php:
+    build:
+      context: ./docker/php
+      args:
+        FRAMEWORK: "none"
+    container_name: ${PROJECT_NAME}_php
+    volumes:
+      - ./:/var/www/html
+    environment:
+      - APP_ENV=dev
+    networks:
+      - app_network
+EOL
+if [[ "$USE_MYSQL" =~ ^[Yy]$ ]]; then
+  echo "    depends_on:" >> "$COMPOSE_FILE"
+  echo "      - mysql" >> "$COMPOSE_FILE"
+fi
+############################NETWORKS############################
+echo "networks:" >> "$COMPOSE_FILE"
+echo "  app_network:" >> "$COMPOSE_FILE"
+echo "" >> "$COMPOSE_FILE"
+############################MYSQL###############################
+if [[ "$USE_MYSQL" =~ ^[Yy]$ ]]; then
+  echo "volumes:" >> "$COMPOSE_FILE"
+  echo "  mysql_data:" >> "$COMPOSE_FILE"
+fi
+
+echo "✅ Docker-compose.yml généré avec les services sélectionnés."
+
+# Vérifier la présence de Composer
+if ! command -v composer &> /dev/null; then
+    echo "❌ Erreur : Composer n'est pas installé sur votre machine."
+    echo "💡 Installez Composer avec : https://getcomposer.org/download/"
+    exit 1
+fi
+
+# Sélection du framework (avec option "Aucun")
+echo "Quel framework souhaitez-vous utiliser ?"
+select FRAMEWORK in "Symfony" "Laravel" "Aucun"; do
+  case $FRAMEWORK in
+    Symfony )
+      FRAMEWORK_ARG="symfony"
+      break;;
+    Laravel )
+      FRAMEWORK_ARG="laravel"
+      break;;
+    Aucun )
+      FRAMEWORK_ARG=""
+      break;;
+    * )
+      echo "❌ Choix invalide, veuillez sélectionner 1 (Symfony), 2 (Laravel) ou 3 (Aucun).";;
+  esac
+done
+
+# Vérifier si le dossier du framework est vide
+if [ ! -d "$PROJECT_NAME/src/Infrastructure/Http/vendor" ]; then
+  echo "📥 Installation du framework en local avant de lancer Docker..."
+  if [ "$FRAMEWORK_ARG" = "symfony" ]; then
+    composer create-project symfony/skeleton "$PROJECT_NAME/src/Infrastructure/Http/"
+  elif [ "$FRAMEWORK_ARG" = "laravel" ]; then
+    composer create-project --prefer-dist laravel/laravel "$PROJECT_NAME/src/Infrastructure/Http/"
+  fi
+  # Vérification de l'installation réussie
+  if [ ! -d "$PROJECT_NAME/src/Infrastructure/Http/vendor" ]; then
+    echo "❌ Erreur lors de l'installation de $FRAMEWORK_ARG. Vérifiez votre connexion internet ou les permissions."
+    exit 1
+  fi
+  echo "✅ $FRAMEWORK_ARG installé avec succès."
+else
+  echo "⚠️ Aucun framework installé."
+fi
+
+# Ouvrir le répertoire du projet
+echo "📂 Ouvrir le répertoire du projet '$PROJECT_NAME'..."
+cd "$PROJECT_NAME" || exit
+if [ -z "$FRAMEWORK_ARG" ]; then
+  echo "❌ Aucun framework sélectionné, annulation du build."
+  exit 1
+fi
+
+# Passer l'argument FRAMEWORK au build Docker
+echo "🚀 Construction de l'image PHP avec $FRAMEWORK_ARG..."
+docker compose build --build-arg FRAMEWORK="$FRAMEWORK_ARG"
+
+# Démarrer les conteneurs
+echo "🚀 Démarrage des conteneurs Docker..."
+docker compose up -d
+# Vérification si les conteneurs sont bien lancés
+if ! docker ps --format "{{.Names}}" | grep -q "${PROJECT_NAME}_php"; then
+  echo "❌ Erreur : Le conteneur PHP ne semble pas démarré. Vérifiez les logs avec 'docker compose logs'."
+  exit 1
+fi
+echo "✅ Structure du projet '$PROJECT_NAME' créée avec succès !"
+
+# Ouvrir le navigateur
+echo "🌐 Ouvrir le navigateur pour accéder à http://localhost:8080..."

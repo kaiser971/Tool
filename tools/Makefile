@@ -1,0 +1,120 @@
+# Définition des chemins
+DUMP_DIR := $(shell realpath $(dir $(lastword $(MAKEFILE_LIST)))/Dump)
+DUMP_FILE_PATH := /tmp/dump_file.txt
+CONTAINER_NAME_PATH := /tmp/container_name.txt
+DB_TYPE_PATH := /tmp/db_type.txt
+MYSQL_DB_PATH := /tmp/mysql_db.txt
+
+# Nettoyage des fichiers temporaires
+clean-temp:
+	@rm -f $(DUMP_FILE_PATH) $(CONTAINER_NAME_PATH) $(DB_TYPE_PATH) $(MYSQL_DB_PATH)
+
+# Étape 1: Sélection du fichier dump
+select-dump: clean-temp
+	@if [ ! -d "$(DUMP_DIR)" ]; then \
+		echo "❌ Erreur : Le dossier Dump n'existe pas dans tools/"; \
+		exit 1; \
+	fi
+	@echo "📂 Liste des fichiers de dump disponibles dans $(DUMP_DIR):"
+	@ls -1 "$(DUMP_DIR)" | nl
+	@read -p "Sélectionnez un fichier dump (numéro) : " choice; \
+	 FILE_NAME=$$(ls -1 "$(DUMP_DIR)" | sed -n "$$choice p"); \
+	 if [ -z "$$FILE_NAME" ]; then \
+	    echo "❌ Erreur : Sélection invalide."; exit 1; \
+	 fi; \
+	 echo "$(DUMP_DIR)/$$FILE_NAME" > $(DUMP_FILE_PATH); \
+	 echo "✅ Dump sélectionné : $$FILE_NAME"
+
+# Étape 2: Sélection du container actif
+select-container:
+	@echo "📦 Liste des containers Docker actifs :"
+	@docker ps --format "{{.Names}}" | nl
+	@read -p "Sélectionnez un container (numéro) : " choice; \
+	 CONTAINER_NAME=$$(docker ps --format "{{.Names}}" | sed -n "$$choice p"); \
+	 if [ -z "$$CONTAINER_NAME" ]; then \
+	    echo "❌ Erreur : Sélection invalide."; exit 1; \
+	 fi; \
+	 echo "$$CONTAINER_NAME" > $(CONTAINER_NAME_PATH); \
+	 echo "✅ Container sélectionné : $$CONTAINER_NAME"
+
+# Étape 3: Sélection du type de base de données
+select-db:
+	@echo "🛢️  Sélectionnez le type de base de données :"
+	@echo "1) MySQL"
+	@echo "2) PostgreSQL"
+	@echo "3) Oracle"
+	@read -p "Choisissez un type de BDD (1/2/3) : " db_choice; \
+	case $$db_choice in \
+		1) echo "mysql" > $(DB_TYPE_PATH); echo "✅ Base de données sélectionnée : MySQL";; \
+		2) echo "postgres" > $(DB_TYPE_PATH); echo "✅ Base de données sélectionnée : PostgreSQL";; \
+		3) echo "oracle" > $(DB_TYPE_PATH); echo "✅ Base de données sélectionnée : Oracle";; \
+		*) echo "❌ Erreur : Sélection invalide."; exit 1;; \
+	esac
+
+# Étape 4 (spécifique à MySQL) : Sélection de la base de données MySQL dans une liste
+select-mysql-db:
+	@if [ "$$(cat $(DB_TYPE_PATH))" = "mysql" ]; then \
+		echo "📋 Liste des bases MySQL disponibles dans le container sélectionné:"; \
+		CONTAINER_NAME=$$(cat $(CONTAINER_NAME_PATH)); \
+		DATABASES=$$(docker exec -i $$CONTAINER_NAME sh -c 'exec mysql -uroot -p$$MYSQL_ROOT_PASSWORD -e "SHOW DATABASES;"' | tail -n +2 | grep -Ev "^(information_schema|performance_schema|mysql|sys)"); \
+		if [ -z "$$DATABASES" ]; then \
+			echo "❌ Aucune base de données disponible."; exit 1; \
+		fi; \
+		echo "$$DATABASES" | nl; \
+		read -p "Sélectionnez une base MySQL (numéro) : " choice; \
+		MYSQL_DB=$$(echo "$$DATABASES" | sed -n "$$choice p"); \
+		if [ -z "$$MYSQL_DB" ]; then \
+			echo "❌ Erreur : Sélection invalide."; exit 1; \
+		fi; \
+		echo "$$MYSQL_DB" > $(MYSQL_DB_PATH); \
+		echo "✅ Base MySQL sélectionnée : $$MYSQL_DB"; \
+	fi
+
+# Étape 5: Exécution de l'importation du dump
+#import-dump: select-dump select-container select-db select-mysql-db
+#	@DUMP_FILE=$$(cat $(DUMP_FILE_PATH)); \
+#	 CONTAINER_NAME=$$(cat $(CONTAINER_NAME_PATH)); \
+#	 DB_TYPE=$$(cat $(DB_TYPE_PATH)); \
+#	 echo "🚀 Importation du dump $$DUMP_FILE dans le container $$CONTAINER_NAME (BDD: $$DB_TYPE)..."; \
+#	 if [ "$$DB_TYPE" = "mysql" ]; then \
+#		MYSQL_DB=$$(cat $(MYSQL_DB_PATH)); \
+#		echo "📥 Importation dans la base $$MYSQL_DB..."; \
+#		docker exec -i $$CONTAINER_NAME sh -c "exec mysql -uroot -p$${MYSQL_ROOT_PASSWORD} $$MYSQL_DB" < $$DUMP_FILE; \
+#	 elif [ "$$DB_TYPE" = "postgres" ]; then \
+#		docker exec -i $$CONTAINER_NAME sh -c "exec psql -U $${POSTGRES_USER} -d $${POSTGRES_DB}" < $$DUMP_FILE; \
+#	 elif [ "$$DB_TYPE" = "oracle" ]; then \
+#		docker exec -i $$CONTAINER_NAME sh -c "exec sqlplus $${ORACLE_USER}/$${ORACLE_PASSWORD}@$${ORACLE_SID}" < $$DUMP_FILE; \
+#	 else \
+#		echo "❌ Type de base de données non reconnu."; exit 1; \
+#	 fi; \
+#	 echo "✅ Importation terminée."
+
+# Étape 5: Exécution de l'importation du dump
+import-dump: select-dump select-container select-db select-mysql-db
+	@if [ ! -f "$(MYSQL_DB_PATH)" ]; then \
+		echo "❌ Erreur : Aucune base de données MySQL sélectionnée."; exit 1; \
+	fi
+	@MYSQL_DB=$$(cat $(MYSQL_DB_PATH)); \
+	CONTAINER_NAME=$$(cat $(CONTAINER_NAME_PATH)); \
+	DUMP_FILE=$$(cat $(DUMP_FILE_PATH)); \
+	if [ ! -f "$$DUMP_FILE" ]; then \
+		echo "❌ Erreur : Le fichier dump n'existe pas."; exit 1; \
+	fi; \
+	echo "📥 Importation dans la base $$MYSQL_DB..."; \
+	echo "⏳ Début de l'importation..."; \
+	if command -v pv >/dev/null 2>&1; then \
+	    echo "🚀 Utilisation de 'pv' pour afficher la progression..."; \
+	    pv "$$DUMP_FILE" | docker exec -i $$CONTAINER_NAME sh -c "exec mysql -uuser -ppassword $$MYSQL_DB"; \
+	else \
+	    echo "⚠️ 'pv' non installé, affichage du statut toutes les 5 secondes..."; \
+	    ( \
+	        i=0; \
+	        while kill -0 $$! 2>/dev/null; do \
+	            i=$$((i+5)); \
+	            echo "⏳ Importation en cours ($$i sec)..."; \
+	            sleep 5; \
+	        done \
+	    ) & \
+	    cat "$$DUMP_FILE" | docker exec -i $$CONTAINER_NAME sh -c "exec mysql -uuser -ppassword $$MYSQL_DB"; \
+	fi
+	@echo "✅ Importation terminée."
