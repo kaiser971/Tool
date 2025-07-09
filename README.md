@@ -1,5 +1,5 @@
 # Tool
-Tools for initialise a project
+Tools for initializing a project
 
 ## 📄 Licence
 
