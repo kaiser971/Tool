@@ -1,12 +1,20 @@
 #!/bin/bash
 
 if [[ "$USE_MYSQL" =~ ^[Yy]$ ]]; then
-  read -p "Enter MySQL username: " MYSQL_USER
+  while true; do
+    read -p "Enter MySQL username (cannot be 'root'): " MYSQL_USER
+    MYSQL_USER=${MYSQL_USER:-"user"}
+    if [[ "$MYSQL_USER" == "root" ]]; then
+      echo "The username 'root' is not allowed. Please choose another." >&2
+    else
+      break
+    fi
+  done
+
   read -sp "Enter MySQL password: " MYSQL_PASSWORD
   echo ""
   read -p "Enter MySQL database name: " MYSQL_DATABASE
 
-  MYSQL_USER=${MYSQL_USER:-"user"}
   MYSQL_PASSWORD=${MYSQL_PASSWORD:-"password"}
   MYSQL_DATABASE=${MYSQL_DATABASE:-"app_db"}
   MYSQL_HOST="localhost"
